@@ -7,12 +7,12 @@
 menu "CoAP client sample"
 
 config COAP_SAMPLE_RESOURCE
-	string "CoAP resource - defaults to Californium observable resource"
-	default "obs"
+	string "CoAP resource - path"
+	default "api/v1/gv5va3mC63vezs1Jke8R/telemetry"
 
 config COAP_SAMPLE_SERVER_HOSTNAME
 	string "CoAP server hostname"
-	default "californium.eclipseprojects.io"
+	default "coap.eu.thingsboard.cloud"
 
 config COAP_SAMPLE_SERVER_PORT
 	int "CoAP server port"
@@ -20,7 +20,7 @@ config COAP_SAMPLE_SERVER_PORT
 
 config COAP_SAMPLE_REQUEST_INTERVAL_SECONDS
 	int "Request interval in seconds"
-	default 5
+	default 120
 
 endmenu
 
