@@ -16,6 +16,7 @@
 #include <zephyr/net/socket.h>
 #endif /* CONFIG_POSIX_API */
 
+#include <modem/lte_lc.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
@@ -193,6 +194,7 @@ static void l4_event_handler(struct net_mgmt_event_callback* cb, uint64_t event,
       return;
   }
 }
+
 static void connectivity_event_handler(struct net_mgmt_event_callback* cb, uint64_t event, struct net_if* iface) {
   if (event == NET_EVENT_CONN_IF_FATAL_ERROR) {
     LOG_ERR("NET_EVENT_CONN_IF_FATAL_ERROR");
@@ -205,6 +207,7 @@ int main(void) {
   int err;
 
   LOG_INF("The CoAP client sample started");
+  k_sleep(K_SECONDS(10));
 
   /* Setup handler for Zephyr NET Connection Manager events and Connectivity layer. */
   net_mgmt_init_event_callback(&l4_cb, l4_event_handler, L4_EVENT_MASK);
@@ -212,6 +215,12 @@ int main(void) {
 
   net_mgmt_init_event_callback(&conn_cb, connectivity_event_handler, CONN_LAYER_EVENT_MASK);
   net_mgmt_add_event_callback(&conn_cb);
+
+  /* For checking eDRX and PSM events */
+
+  // Request PSM and eDRX once the modem is registered
+  // lte_lc_edrx_req(true);
+  lte_lc_psm_req(true);
 
   /* Bring all network interfaces up.
    * Wi-Fi or LTE depending on the board that the sample was built for.

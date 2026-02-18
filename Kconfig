@@ -20,7 +20,7 @@ config COAP_SAMPLE_SERVER_PORT
 
 config COAP_SAMPLE_REQUEST_INTERVAL_SECONDS
 	int "Request interval in seconds"
-	default 120
+	default 180
 
 endmenu
 
