@@ -4,22 +4,34 @@
 # SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
 #
 
-menu "CoAP client sample"
+menu "LISP PoC"
 
-config COAP_SAMPLE_RESOURCE
+config LISP_POC_RESOURCE
 	string "CoAP resource - path"
 	default "api/v1/gv5va3mC63vezs1Jke8R/telemetry"
 
-config COAP_SAMPLE_SERVER_HOSTNAME
+config LISP_POC_SERVER_HOSTNAME
 	string "CoAP server hostname"
 	default "coap.eu.thingsboard.cloud"
 
-config COAP_SAMPLE_SERVER_PORT
+config LISP_POC_SERVER_PORT
 	int "CoAP server port"
 	default 5683
 
-config COAP_SAMPLE_REQUEST_INTERVAL_SECONDS
-	int "Request interval in seconds"
+config LISP_POC_STARTUP_DELAY_SECONDS
+	int "Delay between the powerup and app logic start"
+	default 15
+
+config LISP_POC_DATA_UPLOAD_ITERATIONS
+	int "Number of data transmissions to the server before shutdown"
+	range -1 2147483647
+	default -1
+	help
+	  Number of data transmissions to the server before shutdown.
+	  Set to -1 to transmit indefinitely.
+
+config LISP_POC_UPLOAD_FREQUENCY_SECONDS
+	int "How often data is transmitted to the server"
 	default 180
 
 endmenu
@@ -28,6 +40,7 @@ menu "Zephyr Kernel"
 source "Kconfig.zephyr"
 endmenu
 
-module = COAP_CLIENT_SAMPLE
-module-str = CoAP client sample
+# Log level configuration
+module = LISP_POC
+module-str = LISP PoC
 source "$(ZEPHYR_BASE)/subsys/logging/Kconfig.template.log_config"
