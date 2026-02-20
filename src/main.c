@@ -1,21 +1,13 @@
 /*
- * TODO: Fix global variables, fix duplicated condvar for checking if connected
+ * TODO: Fix global variables, improve the architecture, check for corner cases (how to add robustness), review the code
  */
 
+#include <modem/lte_lc.h>
+#include <modem/modem_info.h>
+#include <modem/nrf_modem_lib.h>
+#include <nrf_modem_at.h>
 #include <stdio.h>
 #include <string.h>
-
-#if defined(CONFIG_POSIX_API)
-#include <zephyr/posix/arpa/inet.h>
-#include <zephyr/posix/netdb.h>
-#include <zephyr/posix/poll.h>
-#include <zephyr/posix/sys/socket.h>
-#else
-#include <zephyr/net/socket.h>
-#endif /* CONFIG_POSIX_API */
-
-#include <modem/lte_lc.h>
-#include <modem/nrf_modem_lib.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
@@ -34,22 +26,18 @@ LOG_MODULE_REGISTER(lisp_poc, CONFIG_LISP_POC_LOG_LEVEL);
   IF_ENABLED(CONFIG_REBOOT, (sys_reboot(0)))
 
 #define MAX_TELEMETRY_SIZE_BYTES 128
+#define MAX_OPERATOR_STRING_SIZE_BYTES 16
+#define MAX_RAT_STRING_SIZE_BYTES 16
 
-static int data_upload_iterations = CONFIG_LISP_POC_DATA_UPLOAD_ITERATIONS;
-
+static int remaining_upload_iterations = CONFIG_LISP_POC_DATA_UPLOAD_ITERATIONS - 1;
 static struct k_work_delayable measure_and_upload_work;
-
 static struct sockaddr_storage server = {0};
 static struct coap_client coap_client = {0};
 static int sock;
+static bool is_connected; /* Variable used to indicate if network is connected. */
 
-/* Variable used to indicate if network is connected. */
-static bool is_connected;
-
-K_SEM_DEFINE(lte_connected_sem, 0, 1);
+/* Mutex and conditional variable used to signal network connectivity and shutdown request. */
 K_SEM_DEFINE(modem_shutdown_sem, 0, 1);
-
-/* Mutex and conditional variable used to signal network connectivity. */
 K_MUTEX_DEFINE(network_connected_lock);
 K_CONDVAR_DEFINE(network_connected);
 
@@ -133,6 +121,64 @@ static int coap_init(void) {
   return 0;
 }
 
+static int get_battery_mv(void) {
+  int mv;
+  if (modem_info_get_batt_voltage(&mv) == 0) {
+    return mv;
+  }
+  return -1;
+}
+
+static int get_rsrp_dbm(void) {
+  int rsrp;
+  if (modem_info_get_rsrp(&rsrp) == 0) {
+    return rsrp;
+  }
+  return -1;
+}
+
+static int get_temperature_degc(void) {
+  int temperature;
+  if (modem_info_get_temperature(&temperature) == 0) {
+    return temperature;
+  }
+  return -1;
+}
+
+static int get_operator(char* buf, size_t len) { return modem_info_string_get(MODEM_INFO_OPERATOR, buf, len); }
+
+static int get_rat(char* buf, size_t len) { return modem_info_string_get(MODEM_INFO_LTE_MODE, buf, len); }
+
+static void build_json_payload(char* payload) {
+  // Generate random temperatures
+  float t1 = 25.0f + (float)((sys_rand32_get() % 20) / 10.0f);  // Range: 25.0 - 27.0 *C
+  float t2 = 27.0f + (float)((sys_rand32_get() % 40) / 10.0f);  // Range: 26.0 - 30.0 *C
+
+  // Collect system metrics
+  uint32_t uptime_s = k_uptime_get() / 1000;
+  int voltage_mv = get_battery_mv();
+  int temperature_degc = get_temperature_degc();
+  int rsrp_dbm = get_rsrp_dbm();
+
+  char operator[MAX_OPERATOR_STRING_SIZE_BYTES];
+  char rat[MAX_RAT_STRING_SIZE_BYTES];
+  if (get_operator(operator, sizeof(operator)) < 0) {
+    strncpy(operator, "unknown", sizeof(operator));
+  }
+  if (get_rat(rat, sizeof(rat)) < 0) {
+    strncpy(rat, "unknown", sizeof(rat));
+  }
+
+  // Construct the json payload in the {"key1":"val1"...}" format
+  snprintk(payload, MAX_TELEMETRY_SIZE_BYTES,
+           "{\"t1\":\"%.2f\", \"t2\":\"%.2f\", \"up_s\":\"%u\", \"temp_c\":\"%d\", \"bat_mv\":\"%d\", \"rsrp\":\"%d\", "
+           "\"plmn\":\"%s\", \"rat\":\"%s\"}",
+           t1, t2, uptime_s, temperature_degc, voltage_mv, rsrp_dbm, operator, rat);
+  LOG_INF("CoAP payload ready: %s", payload);
+
+  return;
+}
+
 static void measure_and_upload_work_fn(struct k_work* work) {
   int err;
   struct coap_client_request req = {
@@ -145,20 +191,8 @@ static void measure_and_upload_work_fn(struct k_work* work) {
 
   wait_for_network();
 
-  // Generate random temperatures
-  uint32_t t1 = (sys_rand32_get() % 10) + 15;
-  uint32_t t2 = (sys_rand32_get() % 5) + 25;
-
-  char temp_temperature_str[10] = "";
-
-  char payload[MAX_TELEMETRY_SIZE_BYTES + 1] = "";  // "{\"t1\":\"1.15\", \"t2\":\"2.24\"}"
-  strncat(payload, "{\"t1\":\"", MAX_TELEMETRY_SIZE_BYTES - strlen(payload));
-  snprintf(temp_temperature_str, 10, "%u", t1);
-  strncat(payload, temp_temperature_str, MAX_TELEMETRY_SIZE_BYTES - strlen(payload));
-  strncat(payload, "\", \"t2\":\"", MAX_TELEMETRY_SIZE_BYTES - strlen(payload));
-  snprintf(temp_temperature_str, 10, "%u", t2);
-  strncat(payload, temp_temperature_str, MAX_TELEMETRY_SIZE_BYTES - strlen(payload));
-  strncat(payload, "\"}", MAX_TELEMETRY_SIZE_BYTES - strlen(payload));
+  char payload[MAX_TELEMETRY_SIZE_BYTES + 1] = "";
+  build_json_payload(payload);
 
   req.payload = payload;
   req.len = strlen((char*)payload);
@@ -172,16 +206,15 @@ static void measure_and_upload_work_fn(struct k_work* work) {
   LOG_INF("CoAP POST request sent to %s, resource: %s", CONFIG_LISP_POC_SERVER_HOSTNAME, CONFIG_LISP_POC_RESOURCE);
 
   /* Transmit a limited number of times and then shutdown. */
-  if (data_upload_iterations > 0) {
-    data_upload_iterations--;
-  } else if (data_upload_iterations == 0) {
+  if (remaining_upload_iterations > 0) {
+    remaining_upload_iterations--;
+  } else if (remaining_upload_iterations == 0) {
     k_sem_give(&modem_shutdown_sem);
     /* No need to schedule work if we're shutting down. */
     return;
   }
 
-  /* Schedule work if we're either transmitting indefinitely or
-   * there are more iterations left.
+  /* Schedule work if we're either transmitting indefinitely or there are more iterations left.
    */
   k_work_schedule(&measure_and_upload_work, K_SECONDS(CONFIG_LISP_POC_UPLOAD_FREQUENCY_SECONDS));
 }
@@ -201,7 +234,6 @@ static void lte_handler(const struct lte_lc_evt* const evt) {
 
       LOG_INF("Network registration status: %s",
               evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME ? "Connected - home" : "Connected - roaming");
-      k_sem_give(&lte_connected_sem);
       /* Update the is_connected and signal it via the cond_va r*/
       k_mutex_lock(&network_connected_lock, K_FOREVER);
       is_connected = true;
@@ -253,10 +285,22 @@ static void lte_handler(const struct lte_lc_evt* const evt) {
   }
 }
 
+static void log_build_cfg(void) {
+  LOG_INF("System Config | startup delay: %d", CONFIG_LISP_POC_STARTUP_DELAY_SECONDS);
+  LOG_INF("Data uploads Config | itterations: %d; interval: %d s", CONFIG_LISP_POC_DATA_UPLOAD_ITERATIONS,
+          CONFIG_LISP_POC_UPLOAD_FREQUENCY_SECONDS);
+  LOG_INF("Network Config | PSM req: %s (sleep: %s, active: %s); eDRX req: %s (LTE-M: %s, NB-IoT: %s)",
+          CONFIG_LTE_PSM_REQ ? "On" : "Off", CONFIG_LTE_PSM_REQ_RPTAU, CONFIG_LTE_PSM_REQ_RAT,
+          CONFIG_LTE_EDRX_REQ ? "On" : "Off", CONFIG_LTE_EDRX_REQ_VALUE_LTE_M, CONFIG_LTE_EDRX_REQ_VALUE_NBIOT);
+}
+
 int main(void) {
   int err;
 
   LOG_INF("LISP PoC started");
+
+  /* Print key parameters from the build configuration */
+  log_build_cfg();
 
   /* Delay the execution of the actual code for a few seconds, e.g. for connecting the tracing software */
   k_sleep(K_SECONDS(CONFIG_LISP_POC_STARTUP_DELAY_SECONDS));
@@ -272,11 +316,9 @@ int main(void) {
     return err;
   }
 
-  /* Request PSM and eDRX before attempting to register to the network */
-  // lte_lc_edrx_req(true);
-  err = lte_lc_psm_req(true);
+  err = modem_info_init();
   if (err) {
-    LOG_WRN("Failed to request the PSM in LTE LC, error: %d", err);
+    LOG_ERR("modem_info_init failed: %d", err);
   }
 
   err = lte_lc_connect_async(lte_handler);
@@ -287,7 +329,7 @@ int main(void) {
   }
 
   /* Wait forever until the modem connects to the network */
-  k_sem_take(&lte_connected_sem, K_FOREVER);
+  wait_for_network();
 
   err = coap_init();
   if (err) {
@@ -299,9 +341,11 @@ int main(void) {
   k_work_schedule(&measure_and_upload_work, K_NO_WAIT);
 
   k_sem_take(&modem_shutdown_sem, K_FOREVER);
+  LOG_INF("Shuting down the modem and exiting main()");
 
   err = nrf_modem_lib_shutdown();
   if (err) {
+    LOG_ERR("Failed to shutdown the nrf modem lib, error: %d", err);
     return err;
   }
 
