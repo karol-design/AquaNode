@@ -8,6 +8,8 @@
 #include <nrf_modem_at.h>
 #include <stdio.h>
 #include <string.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
@@ -149,14 +151,44 @@ static int get_operator(char* buf, size_t len) { return modem_info_string_get(MO
 
 static int get_rat(char* buf, size_t len) { return modem_info_string_get(MODEM_INFO_LTE_MODE, buf, len); }
 
+static float get_ds18b20_temp(const struct device* ds18b20) {
+  if (!device_is_ready(ds18b20)) {
+    LOG_ERR("DS18B20 not ready");
+    return -1000.0f;
+  }
+
+  struct sensor_value temp;
+
+  if (sensor_sample_fetch(ds18b20) < 0) {
+    LOG_ERR("Sample fetch failed");
+    return -1000.0f;
+  }
+
+  if (sensor_channel_get(ds18b20, SENSOR_CHAN_AMBIENT_TEMP, &temp) < 0) {
+    LOG_ERR("Channel get failed");
+    return -1000.0f;
+  }
+
+  float temp_float = sensor_value_to_double(&temp);
+
+  LOG_INF("Temp ds18b20: %.3f C", temp_float);
+  return temp_float;
+}
+
 static void build_json_payload(char* payload) {
   // Generate random temperatures
-  float base = 21.0f + ((sys_rand32_get() % 20) / 10.0f);  // 21.0 – 23.0
+  // float base = 21.0f + ((sys_rand32_get() % 20) / 10.0f);  // 21.0 – 23.0
 
-  float t1 = base + ((int)(sys_rand32_get() % 10) - 5) / 10.0f;  // ±0.5
-  float t2 = base + ((int)(sys_rand32_get() % 15) - 5) / 10.0f;
-  float t3 = base + ((int)(sys_rand32_get() % 7) - 5) / 10.0f;
-  float t4 = base + ((int)(sys_rand32_get() % 16) - 5) / 10.0f;
+  // float t1 = base + ((int)(sys_rand32_get() % 10) - 5) / 10.0f;  // ±0.5
+  // float t2 = base + ((int)(sys_rand32_get() % 15) - 5) / 10.0f;
+  // float t3 = base + ((int)(sys_rand32_get() % 7) - 5) / 10.0f;
+
+  const struct device* ds0 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_0));
+  const struct device* ds1 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_1));
+  const struct device* ds2 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_2));
+  float t1 = get_ds18b20_temp(ds0);
+  float t2 = get_ds18b20_temp(ds1);
+  float t3 = get_ds18b20_temp(ds2);
 
   // Collect system metrics
   uint32_t uptime_s = k_uptime_get() / 1000;
@@ -175,11 +207,11 @@ static void build_json_payload(char* payload) {
 
   // Construct the json payload in the {"key1":"val1",...}" format
   snprintk(payload, MAX_TELEMETRY_SIZE_BYTES,
-           "{\"t1\":%.2f, \"t2\":%.2f, \"t3\":%.2f, \"t4\":%.2f, "
+           "{\"t1\":%.2f, \"t2\":%.2f, \"t3\":%.2f, "
            "\"up_s\":%u, \"temp_c\":%d, "
            "\"bat_mv\":%d, \"rsrp\":%d, "
            "\"plmn\":\"%s\", \"rat\":\"%s\"}",
-           t1, t2, t3, t4, uptime_s, temperature_degc, voltage_mv, rsrp_dbm, operator, rat);
+           t1, t2, t3, uptime_s, temperature_degc, voltage_mv, rsrp_dbm, operator, rat);
   LOG_INF("CoAP payload ready: %s", payload);
 
   return;
