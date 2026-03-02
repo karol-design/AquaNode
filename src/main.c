@@ -1,5 +1,6 @@
 /*
- * TODO: Fix global variables, improve the architecture, check for corner cases (how to add robustness), review the code
+ * TODO: Fix global variables, check return values, improve the architecture, check for corner cases, check for other
+ * coding guides suggestions
  */
 
 #include <modem/lte_lc.h>
@@ -30,13 +31,15 @@ LOG_MODULE_REGISTER(lisp_poc, CONFIG_LISP_POC_LOG_LEVEL);
 #define MAX_TELEMETRY_SIZE_BYTES 256
 #define MAX_OPERATOR_STRING_SIZE_BYTES 16
 #define MAX_RAT_STRING_SIZE_BYTES 16
+#define WAIT_FOR_NETWORK_TIMEOUT_MINUTES 30
 
-static int remaining_upload_iterations = CONFIG_LISP_POC_DATA_UPLOAD_ITERATIONS - 1;
 static struct k_work_delayable measure_and_upload_work;
 static struct sockaddr_storage server = {0};
 static struct coap_client coap_client = {0};
 static int sock;
 static bool is_connected; /* Variable used to indicate if network is connected. */
+
+int last_known_rsrp_dbm = -1;
 
 /* Mutex and conditional variable used to signal network connectivity and shutdown request. */
 K_SEM_DEFINE(modem_shutdown_sem, 0, 1);
@@ -48,7 +51,11 @@ static void wait_for_network(void) {
 
   if (!is_connected) {
     LOG_INF("Waiting for network connectivity");
-    k_condvar_wait(&network_connected, &network_connected_lock, K_FOREVER);
+    int err = k_condvar_wait(&network_connected, &network_connected_lock, K_MINUTES(WAIT_FOR_NETWORK_TIMEOUT_MINUTES));
+    if (err == -EAGAIN) {
+      LOG_ERR("Waiting for the network timed out (timeout: %d minutes)", WAIT_FOR_NETWORK_TIMEOUT_MINUTES);
+      FATAL_ERROR();
+    }
   }
 
   k_mutex_unlock(&network_connected_lock);
@@ -139,6 +146,17 @@ static int get_rsrp_dbm(void) {
   return -1;
 }
 
+static int get_last_known_rsrp_dbm(void) {
+  int rsrp;
+  if (modem_info_get_rsrp(&rsrp) == 0) {
+    last_known_rsrp_dbm = rsrp;
+    return rsrp;
+  } else {
+    return last_known_rsrp_dbm;
+  }
+  return -1;
+}
+
 static int get_temperature_degc(void) {
   int temperature;
   if (modem_info_get_temperature(&temperature) == 0) {
@@ -171,7 +189,7 @@ static float get_ds18b20_temp(const struct device* ds18b20) {
 
   float temp_float = sensor_value_to_double(&temp);
 
-  LOG_INF("Temp ds18b20: %.3f C", temp_float);
+  LOG_INF("Temp ds18b20: %.3f C", (double)temp_float);
   return temp_float;
 }
 
@@ -194,7 +212,7 @@ static void build_json_payload(char* payload) {
   uint32_t uptime_s = k_uptime_get() / 1000;
   int voltage_mv = get_battery_mv();
   int temperature_degc = get_temperature_degc();
-  int rsrp_dbm = get_rsrp_dbm();
+  int rsrp_dbm = get_last_known_rsrp_dbm();
 
   char operator[MAX_OPERATOR_STRING_SIZE_BYTES];
   char rat[MAX_RAT_STRING_SIZE_BYTES];
@@ -211,7 +229,7 @@ static void build_json_payload(char* payload) {
            "\"up_s\":%u, \"temp_c\":%d, "
            "\"bat_mv\":%d, \"rsrp\":%d, "
            "\"plmn\":\"%s\", \"rat\":\"%s\"}",
-           t1, t2, t3, uptime_s, temperature_degc, voltage_mv, rsrp_dbm, operator, rat);
+           (double)t1, (double)t2, (double)t3, uptime_s, temperature_degc, voltage_mv, rsrp_dbm, operator, rat);
   LOG_INF("CoAP payload ready: %s", payload);
 
   return;
@@ -243,17 +261,7 @@ static void measure_and_upload_work_fn(struct k_work* work) {
 
   LOG_INF("CoAP POST request sent to %s, resource: %s", CONFIG_LISP_POC_SERVER_HOSTNAME, CONFIG_LISP_POC_RESOURCE);
 
-  /* Transmit a limited number of times and then shutdown. */
-  if (remaining_upload_iterations > 0) {
-    remaining_upload_iterations--;
-  } else if (remaining_upload_iterations == 0) {
-    k_sem_give(&modem_shutdown_sem);
-    /* No need to schedule work if we're shutting down. */
-    return;
-  }
-
-  /* Schedule work if we're either transmitting indefinitely or there are more iterations left.
-   */
+  /* Schedule the next measurement and upload job */
   k_work_schedule(&measure_and_upload_work, K_SECONDS(CONFIG_LISP_POC_UPLOAD_FREQUENCY_SECONDS));
 }
 
@@ -278,7 +286,6 @@ static void lte_handler(const struct lte_lc_evt* const evt) {
       k_condvar_signal(&network_connected);
       k_mutex_unlock(&network_connected_lock);
       break;
-      break;
     case LTE_LC_EVT_PSM_UPDATE:
       LOG_INF("PSM parameter update: TAU: %d s, Active time: %d s", evt->psm_cfg.tau, evt->psm_cfg.active_time);
       break;
@@ -288,6 +295,9 @@ static void lte_handler(const struct lte_lc_evt* const evt) {
       break;
     case LTE_LC_EVT_RRC_UPDATE:
       LOG_INF("RRC mode: %s", evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED ? "Connected" : "Idle");
+      if (evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED) {
+        last_known_rsrp_dbm = get_rsrp_dbm();
+      }
       break;
     case LTE_LC_EVT_CELL_UPDATE:
       LOG_INF("LTE cell changed: Cell ID: %d, Tracking area: %d", evt->cell.id, evt->cell.tac);
