@@ -1,8 +1,8 @@
-# LISP | Low-Power & Low-Cost IoT Sensing Platform (CoAP Telemetry PoC)
+# AquaNode | Remote Water Monitoring Platform 💧
 
 ## Overview
 
-The **LISP PoC** is a proof-of-concept project for collecting and sending telemetry data over LTE (Cat-M / NB-IoT) using the **nRF9151 DK**. The application periodically gathers system metrics (battery, modem temperature, LTE signal quality) and custom sensor data, formats it as JSON, and sends it to a CoAP server.  
+The **AquaNode Prototype v1** is a proof-of-concept project for collecting and sending telemetry data over LTE (Cat-M / NB-IoT) using the **nRF9151 DK**. The application periodically gathers system metrics (battery, modem temperature, LTE signal quality) and custom sensor data, formats it as JSON, and sends it to a CoAP server.  
 
 This project demonstrates:
 - Asynchronous LTE connection with **PSM and eDRX support**  
