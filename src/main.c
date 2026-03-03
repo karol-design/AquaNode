@@ -34,6 +34,7 @@ LOG_MODULE_REGISTER(lisp_poc, CONFIG_LISP_POC_LOG_LEVEL);
 #define MAX_OPERATOR_STRING_SIZE_BYTES 16
 #define MAX_RAT_STRING_SIZE_BYTES 16
 #define WAIT_FOR_NETWORK_TIMEOUT_MINUTES 30
+#define FATAL_ERROR_SHUTDOWN_DELAY_SECONDS 10
 
 static struct k_work_delayable measure_and_upload_work;
 static struct sockaddr_storage server = {0};
@@ -56,6 +57,8 @@ static void wait_for_network(void) {
     int err = k_condvar_wait(&network_connected, &network_connected_lock, K_MINUTES(WAIT_FOR_NETWORK_TIMEOUT_MINUTES));
     if (err == -EAGAIN) {
       LOG_ERR("Waiting for the network timed out (timeout: %d minutes)", WAIT_FOR_NETWORK_TIMEOUT_MINUTES);
+      k_sem_give(&modem_shutdown_sem);
+      k_sleep(K_SECONDS(FATAL_ERROR_SHUTDOWN_DELAY_SECONDS));
       FATAL_ERROR();
     }
   }
@@ -66,7 +69,12 @@ static void wait_for_network(void) {
 static void response_cb(int16_t code, size_t offset, const uint8_t* payload, size_t len, bool last_block,
                         void* user_data) {
   if (code >= 0) {
-    LOG_INF("CoAP response: code: 0x%x, payload: %s", code, (char*)(payload ? (char*)payload : "NULL"));
+    LOG_INF("CoAP response: code: 0x%x", code);
+    if (code >= COAP_RESPONSE_CODE_BAD_REQUEST) {
+      LOG_ERR("CoAP response code indicates a failure (restarting the device)");
+      lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF);
+      FATAL_ERROR();
+    }
   } else {
     LOG_INF("Response received with error code: %d", code);
   }
@@ -219,12 +227,17 @@ static void build_json_payload(char* payload) {
   }
 
   // Construct the json payload in the {"key1":"val1",...}" format
-  snprintk(payload, MAX_TELEMETRY_SIZE_BYTES,
-           "{\"t1\":%.2f, \"t2\":%.2f, \"t3\":%.2f, "
-           "\"up_h\":%u, \"temp_c\":%d, "
-           "\"bat_mv\":%d, \"rsrp\":%d, "
-           "\"plmn\":\"%s\", \"rat\":\"%s\"}",
-           (double)t1, (double)t2, (double)t3, uptime_h, temperature_degc, voltage_mv, rsrp_dbm, operator, rat);
+  int len =
+      snprintk(payload, MAX_TELEMETRY_SIZE_BYTES,
+               "{\"t1\":%.2f, \"t2\":%.2f, \"t3\":%.2f, "
+               "\"up_h\":%u, \"temp_c\":%d, "
+               "\"bat_mv\":%d, \"rsrp\":%d, "
+               "\"plmn\":\"%s\", \"rat\":\"%s\"}",
+               (double)t1, (double)t2, (double)t3, uptime_h, temperature_degc, voltage_mv, rsrp_dbm, operator, rat);
+
+  if (len < 0 || len >= MAX_TELEMETRY_SIZE_BYTES) {
+    LOG_ERR("MAX_TELEMETRY_SIZE_BYTES reached when building CoAP payload (truncation possible)!");
+  }
   LOG_INF("CoAP payload ready: %s", payload);
 
   return;
@@ -242,7 +255,7 @@ static void measure_and_upload_work_fn(struct k_work* work) {
 
   wait_for_network();
 
-  char payload[MAX_TELEMETRY_SIZE_BYTES + 1] = "";
+  static char payload[MAX_TELEMETRY_SIZE_BYTES + 1] = "";
   build_json_payload(payload);
 
   req.payload = payload;
@@ -251,7 +264,28 @@ static void measure_and_upload_work_fn(struct k_work* work) {
   /* Send request */
   err = coap_client_req(&coap_client, sock, (struct sockaddr*)&server, &req, NULL);
   if (err) {
-    LOG_ERR("Failed to send request: %d", err);
+    /* On error: try repeating the CoAP request once, then try closing the socket and initializing the CoAP again; if
+     * this is failing put the modem to CFUN0 and restart the system */
+    LOG_ERR("Failed to send a CoAP request: %d", err);
+    err = coap_client_req(&coap_client, sock, (struct sockaddr*)&server, &req, NULL);
+    if (err) {
+      LOG_ERR("Failed to send a CoAP request (first retry after failure): %d", err);
+      if (close(sock) < 0) {
+        LOG_ERR("Failed to close the socket: %d", errno);
+      }
+      err = coap_init();
+      if (err) {
+        LOG_ERR("Failed to initialize the CoAP or related sockets, error: %d", err);
+        lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF);
+        FATAL_ERROR();
+      }
+      err = coap_client_req(&coap_client, sock, (struct sockaddr*)&server, &req, NULL);
+      if (err) {
+        LOG_ERR("Failed to send a CoAP request (second retry after failure): %d", err);
+        lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF);
+        FATAL_ERROR();
+      }
+    }
   }
 
   LOG_INF("CoAP POST request sent to %s, resource: %s", CONFIG_LISP_POC_SERVER_HOSTNAME, CONFIG_LISP_POC_RESOURCE);
@@ -372,16 +406,18 @@ int main(void) {
   err = lte_lc_connect_async(lte_handler);
   if (err) {
     LOG_ERR("Failed to connect to LTE network, error: %d", err);
+    lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF);
     FATAL_ERROR();
     return err;
   }
 
-  /* Wait forever until the modem connects to the network */
+  /* Wait until the modem connects to the network */
   wait_for_network();
 
   err = coap_init();
   if (err) {
     LOG_ERR("Failed to initialize the CoAP or related sockets, error: %d", err);
+    lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF);
     FATAL_ERROR();
     return err;
   }
@@ -390,6 +426,11 @@ int main(void) {
 
   k_sem_take(&modem_shutdown_sem, K_FOREVER);
   LOG_INF("Shuting down the modem and exiting main()");
+
+  err = lte_lc_func_mode_set(LTE_LC_FUNC_MODE_POWER_OFF);
+  if (err) {
+    LOG_ERR("Failed to set modem to CFUN=0, err: %d", err);
+  }
 
   err = nrf_modem_lib_shutdown();
   if (err) {
