@@ -36,6 +36,8 @@ LOG_MODULE_REGISTER(lisp_poc, CONFIG_LISP_POC_LOG_LEVEL);
 #define WAIT_FOR_NETWORK_TIMEOUT_MINUTES 30
 #define FATAL_ERROR_SHUTDOWN_DELAY_SECONDS 10
 
+static const float TEMPERATURE_CALIBRATION_OFFSET_DEGC[] = {0.0f, 0.2f, 0.0f};
+
 static struct k_work_delayable measure_and_upload_work;
 static struct sockaddr_storage server = {0};
 static struct coap_client coap_client = {0};
@@ -52,7 +54,7 @@ K_CONDVAR_DEFINE(network_connected);
 static void wait_for_network(void) {
   k_mutex_lock(&network_connected_lock, K_FOREVER);
 
-  if (!is_connected) {
+  while (!is_connected) {
     LOG_INF("Waiting for network connectivity");
     int err = k_condvar_wait(&network_connected, &network_connected_lock, K_MINUTES(WAIT_FOR_NETWORK_TIMEOUT_MINUTES));
     if (err == -EAGAIN) {
@@ -207,9 +209,9 @@ static void build_json_payload(char* payload) {
   const struct device* ds0 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_0));
   const struct device* ds1 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_1));
   const struct device* ds2 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_2));
-  float t1 = get_ds18b20_temp(ds0);
-  float t2 = get_ds18b20_temp(ds1);
-  float t3 = get_ds18b20_temp(ds2);
+  float t1 = get_ds18b20_temp(ds0) + TEMPERATURE_CALIBRATION_OFFSET_DEGC[0];
+  float t2 = get_ds18b20_temp(ds1) + TEMPERATURE_CALIBRATION_OFFSET_DEGC[1];
+  float t3 = get_ds18b20_temp(ds2) + TEMPERATURE_CALIBRATION_OFFSET_DEGC[2];
 
   // Collect system metrics
   uint32_t uptime_h = (k_uptime_get() / 1000) / 3600;
