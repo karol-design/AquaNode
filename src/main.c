@@ -20,6 +20,8 @@
 #include <zephyr/random/random.h>
 #include <zephyr/sys/reboot.h>
 
+#include "leds.h"
+
 LOG_MODULE_REGISTER(lisp_poc, CONFIG_LISP_POC_LOG_LEVEL);
 
 /* Macro called upon a fatal error, reboots the device. */
@@ -194,13 +196,6 @@ static float get_ds18b20_temp(const struct device* ds18b20) {
 }
 
 static void build_json_payload(char* payload) {
-  // Generate random temperatures
-  // float base = 21.0f + ((sys_rand32_get() % 20) / 10.0f);  // 21.0 – 23.0
-
-  // float t1 = base + ((int)(sys_rand32_get() % 10) - 5) / 10.0f;  // ±0.5
-  // float t2 = base + ((int)(sys_rand32_get() % 15) - 5) / 10.0f;
-  // float t3 = base + ((int)(sys_rand32_get() % 7) - 5) / 10.0f;
-
   const struct device* ds0 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_0));
   const struct device* ds1 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_1));
   const struct device* ds2 = DEVICE_DT_GET(DT_NODELABEL(ds18b20_2));
@@ -209,7 +204,7 @@ static void build_json_payload(char* payload) {
   float t3 = get_ds18b20_temp(ds2);
 
   // Collect system metrics
-  uint32_t uptime_s = k_uptime_get() / 1000;
+  uint32_t uptime_h = (k_uptime_get() / 1000) / 3600;
   int voltage_mv = get_battery_mv();
   int temperature_degc = get_temperature_degc();
   int rsrp_dbm = get_last_known_rsrp_dbm();
@@ -226,10 +221,10 @@ static void build_json_payload(char* payload) {
   // Construct the json payload in the {"key1":"val1",...}" format
   snprintk(payload, MAX_TELEMETRY_SIZE_BYTES,
            "{\"t1\":%.2f, \"t2\":%.2f, \"t3\":%.2f, "
-           "\"up_s\":%u, \"temp_c\":%d, "
+           "\"up_h\":%u, \"temp_c\":%d, "
            "\"bat_mv\":%d, \"rsrp\":%d, "
            "\"plmn\":\"%s\", \"rat\":\"%s\"}",
-           (double)t1, (double)t2, (double)t3, uptime_s, temperature_degc, voltage_mv, rsrp_dbm, operator, rat);
+           (double)t1, (double)t2, (double)t3, uptime_h, temperature_degc, voltage_mv, rsrp_dbm, operator, rat);
   LOG_INF("CoAP payload ready: %s", payload);
 
   return;
@@ -296,7 +291,10 @@ static void lte_handler(const struct lte_lc_evt* const evt) {
     case LTE_LC_EVT_RRC_UPDATE:
       LOG_INF("RRC mode: %s", evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED ? "Connected" : "Idle");
       if (evt->rrc_mode == LTE_LC_RRC_MODE_CONNECTED) {
+        leds_signal_rrc_connected();
         last_known_rsrp_dbm = get_rsrp_dbm();
+      } else if (evt->rrc_mode == LTE_LC_RRC_MODE_IDLE) {
+        leds_signal_rrc_idle();
       }
       break;
     case LTE_LC_EVT_CELL_UPDATE:
@@ -346,6 +344,8 @@ int main(void) {
   int err;
 
   LOG_INF("LISP PoC started");
+  leds_init();
+  leds_startup_animation();
 
   /* Print key parameters from the build configuration */
   log_build_cfg();
