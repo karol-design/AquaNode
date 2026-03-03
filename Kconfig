@@ -26,7 +26,7 @@ config LISP_POC_DATA_UPLOAD_ITERATIONS
 
 config LISP_POC_UPLOAD_FREQUENCY_SECONDS
 	int "How often data is transmitted to the server"
-	default 1200
+	default 1800
 
 endmenu
 
